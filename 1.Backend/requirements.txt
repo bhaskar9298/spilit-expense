@@ -1,0 +1,16 @@
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.0.0
+motor>=3.3.2
+python-multipart>=0.0.6
+httpx>=0.26.0
+python-dotenv>=1.0.0
+pydantic[email]>=2.5.0
+
+# LLM + LangGraph + MCP ecosystem
+langchain>=0.3.0
+langgraph>=0.1.0
+langchain-google-genai>=0.1.0
+langchain-mcp-adapters>=0.1.0
+langchain-core>=0.3.0
