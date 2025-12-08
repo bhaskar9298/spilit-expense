@@ -16,9 +16,8 @@ from typing import Optional
 from pathlib import Path
 import sys
 
-CLIENT_DIR = Path(__file__).parent / "client"
-if str(CLIENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CLIENT_DIR))
+# Add client directory to Python path
+sys.path.append(str(Path(__file__).parent.parent / 'client'))
 from langgraph_service import process_tool_call
 
 # Load .env from parent directory
