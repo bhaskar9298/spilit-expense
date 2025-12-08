@@ -3,6 +3,11 @@
 from fastmcp import FastMCP
 from datetime import datetime
 
+import sys
+import pathlib
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 from db.client import expenses_col, client
 
 mcp = FastMCP("ExpenseTracker")
