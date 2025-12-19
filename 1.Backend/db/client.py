@@ -1,4 +1,6 @@
 # db/client.py - MongoDB client and collection setup
+# Phase 1: Added new collections for expense sharing functionality
+
 import os
 import certifi
 import ssl
@@ -29,5 +31,27 @@ client = AsyncIOMotorClient(
     connectTimeoutMS=30000,
 )
 
+# Database reference
 db = client["expense_tracker"]
+
+# ============================================================================
+# EXISTING COLLECTIONS (maintained for backward compatibility)
+# ============================================================================
+
 expenses_col = db["expenses"]
+users_col = db["users"]
+
+# ============================================================================
+# NEW COLLECTIONS (Phase 1: Expense Sharing)
+# ============================================================================
+
+# Group management
+groups_col = db["groups"]
+group_members_col = db["group_members"]
+
+# Split tracking
+expense_participants_col = db["expense_participants"]
+
+# Balance tracking
+balances_col = db["balances"]
+settlements_col = db["settlements"]
