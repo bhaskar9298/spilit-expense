@@ -22,7 +22,7 @@ from db.client import (
     users_col,
     client
 )
-from server.utils.authorization import (
+from utils.authorization import (
     is_user_in_group,
     is_user_group_admin,
     get_user_by_email,
@@ -32,7 +32,7 @@ from server.utils.authorization import (
     get_group_member_count,
     verify_group_exists
 )
-from server.utils.splits import (
+from utils.splits import (
     calculate_splits,
     format_split_summary
 )
