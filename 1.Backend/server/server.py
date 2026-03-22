@@ -22,7 +22,7 @@ from db.client import (
     users_col,
     client
 )
-from server.utils.authorization import (
+from utils.authorization import (
     is_user_in_group,
     is_user_group_admin,
     get_user_by_email,
@@ -32,7 +32,7 @@ from server.utils.authorization import (
     get_group_member_count,
     verify_group_exists
 )
-from server.utils.splits import (
+from utils.splits import (
     calculate_splits,
     format_split_summary
 )
@@ -513,13 +513,15 @@ async def add_group_member(user_id: str, group_id: str, member_email: str, role:
         if role not in ["admin", "member"]:
             return {"status": "error", "message": "Role must be 'admin' or 'member'"}
         
+        # Check if group exists
+        if not await verify_group_exists(group_id):
+            return {"status": "error", "message": "Group not found"}
+        
         # Check if requesting user can add members
         if not await can_user_add_members(user_id, group_id):
             return {"status": "error", "message": "Access denied: Only admins can add members"}
         
-        # Check if group exists
-        if not await verify_group_exists(group_id):
-            return {"status": "error", "message": "Group not found"}
+
         
         # Find user by email
         new_user = await get_user_by_email(member_email)
