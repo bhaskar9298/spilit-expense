@@ -513,13 +513,15 @@ async def add_group_member(user_id: str, group_id: str, member_email: str, role:
         if role not in ["admin", "member"]:
             return {"status": "error", "message": "Role must be 'admin' or 'member'"}
         
+        # Check if group exists
+        if not await verify_group_exists(group_id):
+            return {"status": "error", "message": "Group not found"}
+        
         # Check if requesting user can add members
         if not await can_user_add_members(user_id, group_id):
             return {"status": "error", "message": "Access denied: Only admins can add members"}
         
-        # Check if group exists
-        if not await verify_group_exists(group_id):
-            return {"status": "error", "message": "Group not found"}
+
         
         # Find user by email
         new_user = await get_user_by_email(member_email)
