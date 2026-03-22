@@ -7,6 +7,7 @@ python-multipart>=0.0.6
 httpx>=0.26.0
 python-dotenv>=1.0.0
 pydantic[email]>=2.5.0
+pymongo>=4.6.1
 
 # LLM + LangGraph + MCP ecosystem
 langchain>=0.3.0
