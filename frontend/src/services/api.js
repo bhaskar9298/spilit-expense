@@ -15,7 +15,7 @@ export const authAPI = {
 };
 
 export const mcpAPI = {
-  execute: (tool, args) => api.post('/mcp/execute', { tool, args }),
+  execute: (message) => api.post('/mcp/execute', { message })
 };
 
 export default api;

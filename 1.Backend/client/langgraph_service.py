@@ -1,153 +1,237 @@
-# client/langgraph_service.py - LangGraph MCP Service
+# client/langgraph_service.py
+
 from langgraph.graph import StateGraph, START
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_mcp_adapters.client import MultiServerMCPClient
 import os
 import json
-import asyncio
+import traceback
 from pathlib import Path
+from datetime import datetime
 
-# Load .env from parent directory
+# Load env
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 api_key = os.getenv("GEMINI_API_KEY")
-mcp_server_url = os.getenv("MCP_SERVER_URL", "https://optimistic-brown-antelope.fastmcp.app/mcp")
+mcp_server_url = os.getenv("MCP_SERVER_URL")
 
-# Initialize LLM
+# LLM
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=api_key,
     temperature=0.1
 )
 
-# MCP client - global instance
 _mcp_client = None
 _chatbot = None
 
-# State
+
+# =========================================================
+# STATE
+# =========================================================
+
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    user_id: str
+    context: dict
+
+
+# =========================================================
+# 🔥 SCHEMA FIX (CRITICAL)
+# =========================================================
+
+def fix_schema_dict(schema: dict, tool_name: str):
+    """Recursively fix schema for Gemini compatibility"""
+
+    if not isinstance(schema, dict):
+        return {"type": "string"}
+
+    schema_type = schema.get("type")
+
+    # Fix arrays
+    if schema_type == "array":
+        if "items" not in schema:
+            print(f"⚠️ Fixing array items for {tool_name}")
+            schema["items"] = {"type": "string"}
+        else:
+            schema["items"] = fix_schema_dict(schema["items"], tool_name)
+
+    # Fix objects
+    elif schema_type == "object":
+        props = schema.get("properties", {})
+        for key, val in props.items():
+            props[key] = fix_schema_dict(val, f"{tool_name}.{key}")
+
+    # Ensure type exists
+    if "type" not in schema:
+        schema["type"] = "string"
+
+    return schema
+
+
+def fix_tool_schema(tool):
+    """Handle MCP dict schemas + Pydantic schemas"""
+
+    try:
+        # ✅ MCP tools (dict schema)
+        if isinstance(tool.args_schema, dict):
+            schema = tool.args_schema
+            tool.args_schema = fix_schema_dict(schema, tool.name)
+            return tool
+
+        # ✅ Pydantic schema (fallback)
+        elif hasattr(tool.args_schema, "model_json_schema"):
+            original_fn = tool.args_schema.model_json_schema
+
+            def patched():
+                schema = original_fn()
+                return fix_schema_dict(schema, tool.name)
+
+            tool.args_schema.model_json_schema = patched
+
+    except Exception as e:
+        print(f"⚠️ Schema fix failed for {tool.name}: {e}")
+
+    return tool
+
+
+def validate_tool_schema(tools):
+    fixed = []
+    for tool in tools:
+        try:
+            fixed.append(fix_tool_schema(tool))
+            print(f"✓ Tool validated: {tool.name}")
+        except Exception as e:
+            print(f"✗ Tool failed: {tool.name} -> {e}")
+    return fixed
+
+
+# =========================================================
+# MCP INIT
+# =========================================================
 
 async def initialize_client():
-    """Initialize MCP client and chatbot graph once"""
     global _mcp_client, _chatbot
-    
-    if _chatbot is not None:
+
+    if _chatbot:
         return _chatbot
-    
-    # Initialize MCP client
-    _mcp_client = MultiServerMCPClient(
-        {
-            "expense": {
+
+    try:
+        print(f"🔌 Connecting to MCP server: {mcp_server_url}")
+
+        _mcp_client = MultiServerMCPClient({
+            "expense_tracker": {
                 "transport": "streamable_http",
                 "url": mcp_server_url
             }
-        }
-    )
-    
-    # Get tools from MCP server
-    tools = await _mcp_client.get_tools()
-    llm_with_tools = llm.bind_tools(tools)
-    
-    # Build graph
-    async def chat_node(state: ChatState):
-        messages = state["messages"]
-        response = await llm_with_tools.ainvoke(messages)
-        return {'messages': [response]}
-    
-    tool_node = ToolNode(tools)
-    
-    graph = StateGraph(ChatState)
-    graph.add_node("chat_node", chat_node)
-    graph.add_node("tools", tool_node)
-    
-    graph.add_edge(START, "chat_node")
-    graph.add_conditional_edges("chat_node", tools_condition)
-    graph.add_edge("tools", "chat_node")
-    
-    _chatbot = graph.compile()
-    return _chatbot
-
-async def process_tool_call(tool_name: str, args: dict, user_id: str):
-    """
-    Process a pre-parsed tool call (from Gemini.js) through LangGraph
-    This maintains compatibility with existing frontend
-    """
-    try:
-        # Initialize chatbot if needed
-        chatbot = await initialize_client()
-        
-        # Inject user_id into args
-        args_with_user = {
-            "user_id": user_id,
-            **args
-        }
-        
-        # Convert to natural language for LLM
-        if tool_name == "add_expense":
-            user_input = f"Add an expense: amount={args.get('amount')}, category={args.get('category')}, date={args.get('date')}"
-            if args.get('subcategory'):
-                user_input += f", subcategory={args.get('subcategory')}"
-            if args.get('note'):
-                user_input += f", note={args.get('note')}"
-        elif tool_name == "list_expenses":
-            user_input = f"List expenses from {args.get('start_date')} to {args.get('end_date')}"
-        elif tool_name == "summarize":
-            user_input = f"Summarize expenses from {args.get('start_date')} to {args.get('end_date')}"
-            if args.get('category'):
-                user_input += f" for category {args.get('category')}"
-        else:
-            user_input = f"Call tool {tool_name} with args: {json.dumps(args)}"
-        
-        # Add user context
-        enhanced_input = f"""User ID: {user_id}
-Task: {user_input}
-
-CRITICAL: When calling MCP tools, use these EXACT parameters:
-{json.dumps(args_with_user, indent=2)}
-
-Dates must be in YYYY-MM-DD format (no timestamps).
-"""
-        
-        # Run the graph
-        result = await chatbot.ainvoke({
-            "messages": [HumanMessage(content=enhanced_input)]
         })
-        
-        # Extract tool result from messages
-        for msg in reversed(result['messages']):
-            # Look for tool message type
-            if hasattr(msg, 'type') and msg.type == 'tool':
-                try:
-                    # Parse JSON content
-                    return json.loads(msg.content)
-                except json.JSONDecodeError:
-                    return {"content": msg.content}
-        
-        # Fallback: return final message content
-        final_message = result['messages'][-1]
-        return {"content": final_message.content}
-        
+
+        tools = await _mcp_client.get_tools()
+        print(f"📦 Tools loaded: {len(tools)}")
+
+        # 🔥 Fix schemas BEFORE binding
+        tools = validate_tool_schema(tools)
+
+        llm_with_tools = llm.bind_tools(tools)
+
+        # =================================================
+        # GRAPH
+        # =================================================
+
+        async def chat_node(state: ChatState):
+            messages = state["messages"]
+            user_id = state.get("user_id", "unknown")
+
+            last = messages[-1]
+
+            if isinstance(last, HumanMessage):
+                enhanced = f"""
+You are an expense tracking assistant.
+
+User ID: {user_id}
+Date: {datetime.now().strftime('%Y-%m-%d')}
+
+User request:
+"{last.content}"
+
+Instructions:
+- Always include user_id in tool calls
+- Convert dates properly
+- Use correct tool
+"""
+                messages = messages[:-1] + [HumanMessage(content=enhanced)]
+
+            response = await llm_with_tools.ainvoke(messages)
+            return {"messages": [response]}
+
+        tool_node = ToolNode(tools)
+
+        graph = StateGraph(ChatState)
+        graph.add_node("chat_node", chat_node)
+        graph.add_node("tools", tool_node)
+
+        graph.add_edge(START, "chat_node")
+        graph.add_conditional_edges("chat_node", tools_condition)
+        graph.add_edge("tools", "chat_node")
+
+        _chatbot = graph.compile()
+
+        print("✅ Chatbot ready")
+        return _chatbot
+
     except Exception as e:
+        print(f"❌ Init failed: {e}")
+        traceback.print_exc()
+        raise
+
+
+# =========================================================
+# PROCESS MESSAGE
+# =========================================================
+
+async def process_user_message(message: str, user_id: str, context: dict = None):
+    try:
+        chatbot = await initialize_client()
+
+        if context is None:
+            context = {}
+
+        state = {
+            "messages": [HumanMessage(content=message)],
+            "user_id": user_id,
+            "context": context
+        }
+
+        result = await chatbot.ainvoke(state)
+
+        return extract_response(result["messages"])
+
+    except Exception as e:
+        traceback.print_exc()
         raise Exception(f"LangGraph processing failed: {str(e)}")
 
-# For testing
-if __name__ == '__main__':
-    async def test():
-        result = await process_tool_call(
-            "list_expenses",
-            {
-                "start_date": "2025-12-01",
-                "end_date": "2025-12-31"
-            },
-            "69340c8c3a58dfab5e887dd2"
-        )
-        print(json.dumps(result, indent=2))
-    
-    asyncio.run(test())
+
+# =========================================================
+# RESPONSE PARSER
+# =========================================================
+
+def extract_response(messages):
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            try:
+                data = json.loads(msg.content)
+                return {"type": "tool_result", "data": data}
+            except:
+                return {"type": "tool_result", "data": {"raw": msg.content}}
+
+    for msg in reversed(messages):
+        if hasattr(msg, "content"):
+            return {"type": "assistant", "data": msg.content}
+
+    return {"type": "error", "data": "No response"}
