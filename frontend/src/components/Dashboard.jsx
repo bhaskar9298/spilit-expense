@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authAPI, mcpAPI } from '../services/api';
-import { parseNaturalLanguage } from '../services/gemini';
+// import { parseNaturalLanguage } from '../services/gemini';
 import ExpenseList from './ExpenseList';
 import Summary from './Summary';
 import { Sparkles, LogOut, Loader2 } from 'lucide-react';
@@ -42,42 +42,41 @@ export default function Dashboard({ user, setUser }) {
   };
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!input.trim()) return;
+  e.preventDefault();
+  if (!input.trim()) return;
 
-    setLoading(true);
-    setMessage('');
+  setLoading(true);
+  setMessage('');
 
-    try {
-      // Step 1: Parse natural language with Gemini
-      const { tool, args } = await parseNaturalLanguage(input);
-      
-      // Step 2: Execute MCP tool via FastAPI gateway
-      const response = await mcpAPI.execute(tool, args);
-      
-      // Handle response based on tool
-      if (tool === 'add_expense' && response.data.status === 'success') {
-        setMessage('✅ Expense added successfully!');
-        setInput('');
-      } else if (tool === 'list_expenses' && Array.isArray(response.data)) {
-        setExpenses(response.data);
-        setActiveTab('list');
-        setMessage(`✅ Found ${response.data.length} expenses`);
-      } else if (tool === 'summarize' && Array.isArray(response.data)) {
-        setSummary(response.data);
+  try {
+    const response = await mcpAPI.execute(input);
+
+    const data = response.data;
+
+    if (Array.isArray(data)) {
+      // Could be list or summary
+      if (data.length > 0 && data[0].category && data[0].total_amount) {
+        setSummary(data);
         setActiveTab('summary');
         setMessage('✅ Summary generated');
-      } else if (response.data.status === 'error') {
-        setMessage(`❌ Error: ${response.data.message}`);
+      } else {
+        setExpenses(data);
+        setActiveTab('list');
+        setMessage(`✅ Found ${data.length} expenses`);
       }
-      
-    } catch (error) {
-      console.error('Error:', error);
-      setMessage('❌ Failed to process request: ' + (error.response?.data?.detail || error.message));
-    } finally {
-      setLoading(false);
+    } else if (data?.status === 'success') {
+      setMessage('✅ Expense added successfully!');
+      setInput('');
+    } else {
+      setMessage('✅ Done');
     }
-  };
+
+  } catch (error) {
+    setMessage('❌ ' + (error.response?.data?.detail || error.message));
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
