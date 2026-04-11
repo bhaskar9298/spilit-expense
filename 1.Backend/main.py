@@ -20,7 +20,7 @@ import sys
 CLIENT_DIR = Path(__file__).parent / "client"
 if str(CLIENT_DIR) not in sys.path:
     sys.path.insert(0, str(CLIENT_DIR))
-from langgraph_service import process_tool_call
+from langgraph_service import process_user_message
 
 # Load .env from parent directory
 env_path = Path(__file__).parent.parent / '.env'
@@ -68,8 +68,7 @@ class UserLogin(BaseModel):
     password: str
 
 class MCPExecuteRequest(BaseModel):
-    tool: str
-    args: dict
+    message: str
 
 class TokenData(BaseModel):
     email: str
@@ -235,11 +234,10 @@ async def execute_mcp_tool(
     """
     try:
         # Process with LangGraph (maintains compatibility with Gemini.js parsing)
-        result = await process_tool_call(
-            tool_name=request.tool,
-            args=request.args,
-            user_id=current_user.user_id
-        )
+        result = await process_user_message(
+    message=request.message,
+    user_id=current_user.user_id
+)
         
         # Return the result (already in correct format from MCP)
         return result
