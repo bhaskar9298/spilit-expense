@@ -1084,5 +1084,5 @@ async def setup_database():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-if __name__ == "__main__":
+
     mcp.run(transport="http", host="0.0.0.0", port=8000)

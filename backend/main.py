@@ -15,12 +15,13 @@ import json
 from typing import Optional
 from pathlib import Path
 import sys
+from client.langgraph_service import process_user_message
 
 # Add client directory to Python path
 CLIENT_DIR = Path(__file__).parent / "client"
 if str(CLIENT_DIR) not in sys.path:
     sys.path.insert(0, str(CLIENT_DIR))
-from langgraph_service import process_user_message
+
 
 # Load .env from parent directory
 env_path = Path(__file__).parent.parent / '.env'
