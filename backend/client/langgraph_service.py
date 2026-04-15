@@ -4,9 +4,9 @@ from langgraph.graph import StateGraph, START
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import tools_condition
 from langchain_mcp_adapters.client import MultiServerMCPClient
 import os
 import json
@@ -43,18 +43,15 @@ class ChatState(TypedDict):
 
 
 # =========================================================
-# 🔥 SCHEMA FIX (CRITICAL)
+# SCHEMA FIX (CRITICAL for Gemini compatibility)
 # =========================================================
 
 def fix_schema_dict(schema: dict, tool_name: str):
-    """Recursively fix schema for Gemini compatibility"""
-
     if not isinstance(schema, dict):
         return {"type": "string"}
 
     schema_type = schema.get("type")
 
-    # Fix arrays
     if schema_type == "array":
         if "items" not in schema:
             print(f"⚠️ Fixing array items for {tool_name}")
@@ -62,13 +59,11 @@ def fix_schema_dict(schema: dict, tool_name: str):
         else:
             schema["items"] = fix_schema_dict(schema["items"], tool_name)
 
-    # Fix objects
     elif schema_type == "object":
         props = schema.get("properties", {})
         for key, val in props.items():
             props[key] = fix_schema_dict(val, f"{tool_name}.{key}")
 
-    # Ensure type exists
     if "type" not in schema:
         schema["type"] = "string"
 
@@ -76,28 +71,17 @@ def fix_schema_dict(schema: dict, tool_name: str):
 
 
 def fix_tool_schema(tool):
-    """Handle MCP dict schemas + Pydantic schemas"""
-
     try:
-        # ✅ MCP tools (dict schema)
         if isinstance(tool.args_schema, dict):
-            schema = tool.args_schema
-            tool.args_schema = fix_schema_dict(schema, tool.name)
+            tool.args_schema = fix_schema_dict(tool.args_schema, tool.name)
             return tool
-
-        # ✅ Pydantic schema (fallback)
         elif hasattr(tool.args_schema, "model_json_schema"):
             original_fn = tool.args_schema.model_json_schema
-
             def patched():
-                schema = original_fn()
-                return fix_schema_dict(schema, tool.name)
-
+                return fix_schema_dict(original_fn(), tool.name)
             tool.args_schema.model_json_schema = patched
-
     except Exception as e:
         print(f"⚠️ Schema fix failed for {tool.name}: {e}")
-
     return tool
 
 
@@ -110,6 +94,66 @@ def validate_tool_schema(tools):
         except Exception as e:
             print(f"✗ Tool failed: {tool.name} -> {e}")
     return fixed
+
+
+# =========================================================
+# SECURE TOOL NODE — hard-injects user_id from state
+# =========================================================
+
+class SecureToolNode:
+    """
+    Wraps tool execution to hard-overwrite user_id on every tool call.
+    The LLM never controls which user_id is used — it's always pulled
+    from the verified JWT state set by the FastAPI gateway.
+    """
+
+    def __init__(self, tools: list):
+        self.tools_by_name = {tool.name: tool for tool in tools}
+
+    async def __call__(self, state: ChatState) -> dict:
+        user_id = state["user_id"]
+        messages = state["messages"]
+
+        # Find the last AIMessage that contains tool_calls
+        last_ai_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                last_ai_message = msg
+                break
+
+        if not last_ai_message:
+            return {"messages": []}
+
+        tool_results = []
+
+        for tool_call in last_ai_message.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = dict(tool_call["args"])  # copy to avoid mutation
+
+            # 🔒 SECURITY: Force user_id regardless of what LLM provided
+            if "user_id" in tool_args or tool_name not in ("setup_database",):
+                tool_args["user_id"] = user_id
+                print(f"🔒 Injected user_id={user_id} into tool '{tool_name}'")
+
+            tool = self.tools_by_name.get(tool_name)
+            if not tool:
+                result_content = json.dumps({"status": "error", "message": f"Tool '{tool_name}' not found"})
+            else:
+                try:
+                    result = await tool.ainvoke(tool_args)
+                    result_content = json.dumps(result) if not isinstance(result, str) else result
+                except Exception as e:
+                    result_content = json.dumps({"status": "error", "message": str(e)})
+
+            tool_results.append(
+                ToolMessage(
+                    content=result_content,
+                    tool_call_id=tool_call["id"],
+                    name=tool_name
+                )
+            )
+
+        return {"messages": tool_results}
 
 
 # =========================================================
@@ -135,7 +179,6 @@ async def initialize_client():
         tools = await _mcp_client.get_tools()
         print(f"📦 Tools loaded: {len(tools)}")
 
-        # 🔥 Fix schemas BEFORE binding
         tools = validate_tool_schema(tools)
 
         llm_with_tools = llm.bind_tools(tools)
@@ -144,37 +187,32 @@ async def initialize_client():
         # GRAPH
         # =================================================
 
-        async def chat_node(state: ChatState):
+        async def chat_node(state: ChatState) -> dict:
             messages = state["messages"]
-            user_id = state.get("user_id", "unknown")
-
             last = messages[-1]
 
+            # Only enhance the initial human message (not tool results looping back)
             if isinstance(last, HumanMessage):
-                enhanced = f"""
-You are an expense tracking assistant.
-
-User ID: {user_id}
-Date: {datetime.now().strftime('%Y-%m-%d')}
-
-User request:
-"{last.content}"
-
-Instructions:
-- Always include user_id in tool calls
-- Convert dates properly
-- Use correct tool
-"""
-                messages = messages[:-1] + [HumanMessage(content=enhanced)]
+                enhanced_content = (
+                    f"You are an expense tracking assistant.\n"
+                    f"Today's date: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+                    f"User request: \"{last.content}\"\n\n"
+                    f"Instructions:\n"
+                    f"- Do NOT include or guess user_id — it is injected automatically\n"
+                    f"- Convert relative dates (today, yesterday, this month) to YYYY-MM-DD\n"
+                    f"- Use the correct tool for the request\n"
+                    f"- Respond naturally after tool results"
+                )
+                messages = messages[:-1] + [HumanMessage(content=enhanced_content)]
 
             response = await llm_with_tools.ainvoke(messages)
             return {"messages": [response]}
 
-        tool_node = ToolNode(tools)
+        secure_tool_node = SecureToolNode(tools)
 
         graph = StateGraph(ChatState)
         graph.add_node("chat_node", chat_node)
-        graph.add_node("tools", tool_node)
+        graph.add_node("tools", secure_tool_node)
 
         graph.add_edge(START, "chat_node")
         graph.add_conditional_edges("chat_node", tools_condition)
@@ -199,17 +237,13 @@ async def process_user_message(message: str, user_id: str, context: dict = None)
     try:
         chatbot = await initialize_client()
 
-        if context is None:
-            context = {}
-
         state = {
             "messages": [HumanMessage(content=message)],
             "user_id": user_id,
-            "context": context
+            "context": context or {}
         }
 
         result = await chatbot.ainvoke(state)
-
         return extract_response(result["messages"])
 
     except Exception as e:
@@ -218,10 +252,16 @@ async def process_user_message(message: str, user_id: str, context: dict = None)
 
 
 # =========================================================
-# RESPONSE PARSER
+# RESPONSE PARSER (unchanged — Fix #5 is next)
 # =========================================================
 
 def extract_response(messages):
+    # Return the last AIMessage — it has already synthesized the tool results
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content:
+            return {"type": "assistant", "data": msg.content}
+
+    # Fallback: if no AI synthesis, return the last tool result raw
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
             try:
@@ -229,9 +269,5 @@ def extract_response(messages):
                 return {"type": "tool_result", "data": data}
             except:
                 return {"type": "tool_result", "data": {"raw": msg.content}}
-
-    for msg in reversed(messages):
-        if hasattr(msg, "content"):
-            return {"type": "assistant", "data": msg.content}
 
     return {"type": "error", "data": "No response"}
